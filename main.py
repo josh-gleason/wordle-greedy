@@ -33,12 +33,10 @@ def hints_to_str(hints):
 
 
 class Engine:
-    def __init__(self, strategy='minmax'):
-        assert strategy in ['minmax', 'min_avg']
+    def __init__(self):
         self.candidates = np.load('bitword_candidates.npy')
         self.dictionary = np.load('bitword_dictionary.npy')
         self.guesses = 0
-        self.strategy = strategy
         self.guess_list = []
         self.hint_list = []
         with open('lookup_table_raise.pkl', 'rb') as f:
@@ -53,26 +51,24 @@ class Engine:
         self.hint_list.append(tuple(hints.tolist()))
 
     def get_best_guess(self):
-        if self.strategy == 'minmax':
-            d = self.lookup_table
-            found = True
-            for guess, hint in zip(self.guess_list, self.hint_list):
-                if guess in d and hint in d[guess]:
-                    d = d[guess][hint]
-                else:
-                    found = False
-                    break
-            if found:
-                for k in d:
-                    return k
+        d = self.lookup_table
+        found = True
+        for guess, hint in zip(self.guess_list, self.hint_list):
+            if guess in d and hint in d[guess]:
+                d = d[guess][hint]
+            else:
+                found = False
+                break
+        if found:
+            for k in d:
+                return k
 
         if len(self.candidates) < 3:
             return _decode(self.candidates[0])
 
         min_max_match = float('inf')
-        min_max_guess = []
         min_tot_match = float('inf')
-        min_tot_guess = []
+        min_max_guess = []
         for guess in tqdm(self.dictionary):
             tot_match = 0
             max_match = -float('inf')
@@ -89,12 +85,9 @@ class Engine:
                 min_max_guess.append((tot_match, guess))
 
             if tot_match < min_tot_match:
-                min_tot_guess = [(max_match, guess)]
                 min_tot_match = tot_match
-            elif tot_match == min_tot_match:
-                min_tot_guess.append((max_match, guess))
 
-        guess_options = min_max_guess if self.strategy == 'minmax' else min_tot_guess
+        guess_options = min_max_guess
         guess_options = sorted(guess_options, key=lambda t: t[0])
 
         for secondary, guess in guess_options:
