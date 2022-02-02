@@ -2,9 +2,11 @@ import pickle as pkl
 import numpy as np
 from tqdm import tqdm
 import os
+from collections import Counter
 
 DICTIONARY = np.load('bitword_dictionary.npy')
-CANDIDATES = np.load('bitword_candidates.npy')
+CANDIDATES = np.load('bitword_dictionary.npy')
+
 
 def encode(word):
     return np.array([1 << (ord(v)-ord('a')) for v in word], dtype=np.uint32)
@@ -26,80 +28,85 @@ def generate_hints(word, guess):
     return hints
 
 
-class State:
-    def __init__(self, word):
-        self.word = word
-        self.candidates = CANDIDATES.copy()
-        self.hints = []
+def generate_all_hints(guess, candidates):
+    green = (guess[None, :] == candidates).astype(int)
+    not_grey = np.zeros(green.shape, dtype=int)
 
-    def score(self):
-        return len(self.candidates)
+    num_rem = dict()
+    for c,n in Counter(guess).items():
+        if n > 1:
+            matches = (CANDIDATES == c)
+            num_correct = np.logical_and(matches, green).sum(axis=1)
+            num_in = matches.sum(axis=1)
+            num_rem[c] = num_in - num_correct
 
-    def guess(self, guess):
-        hints = generate_hints(self.word, guess)
+    for i,c in enumerate(guess):
+        if c in num_rem:
+            not_grey[:, i] = np.logical_or(num_rem[c] > 0, green[:,i])
+            num_rem[c] -= (1 - green[:, i])
+        else:
+            not_grey[:, i] = np.any(CANDIDATES == c, axis=1)
 
-        green = [(i,gc) for i,(h,gc) in enumerate(zip(hints,guess)) if h==1]
-        yellow = [(i,gc) for i,(h,gc) in enumerate(zip(hints,guess)) if h==0]
-        grey = [(i,gc) for i,(h,gc) in enumerate(zip(hints,guess)) if h==-1]
+    hints = not_grey + green - 1
+    return hints
 
-        exact_counts = set()
-        exact_chars = set()
-        grey_to_yellow = set()
-        for i,gc in grey:
-            if gc in self.word:
-                exact_counts.add((gc,(self.word==gc).sum()))
-                exact_chars.add(gc)
-                grey_to_yellow.add((i,gc))
-        min_counts = set()
-        for i,gc in green+yellow:
-            if gc not in exact_chars:
-                min_counts.add((gc,(guess==gc).sum()))
-        for s in grey_to_yellow:
-            grey.remove(s)
-            yellow.append(s)
 
-        keep = np.arange(len(self.candidates),dtype=int)
-        for j,c in green:
-            keep = keep[self.candidates[keep,j]==c]
-        for j,c in yellow:
-            keep = keep[self.candidates[keep,j]!=c]
-        for c,n in exact_counts:
-            keep = keep[(self.candidates[keep]==c).sum(axis=1)==n]
-        for c,n in min_counts:
-            keep = keep[(self.candidates[keep]==c).sum(axis=1)>=n]
-        for j,c in grey:
-            keep = keep[np.all(self.candidates[keep]!=c,axis=1)]
+def count_remaining_candidates(guess, hints):
+    green = [(i, gc) for i, (h, gc) in enumerate(zip(hints, guess)) if h == 1]
+    yellow = [(i, gc) for i, (h, gc) in enumerate(zip(hints, guess)) if h == 0]
+    grey = [(i, gc) for i, (h, gc) in enumerate(zip(hints, guess)) if h == -1]
 
-        return keep
+    exact_counts = set()
+    exact_chars = set()
+    grey_to_yellow = set()
+    for i, gc in grey:
+        count = sum(c==gc for _,c in yellow+green)
+        if count > 0:
+            exact_counts.add((gc, count))
+            exact_chars.add(gc)
+            grey_to_yellow.add((i, gc))
+    min_counts = set()
+    for i, gc in green + yellow:
+        if gc not in exact_chars:
+            min_counts.add((gc, (guess == gc).sum()))
+    for s in grey_to_yellow:
+        grey.remove(s)
+        yellow.append(s)
+
+    match = np.arange(len(CANDIDATES), dtype=int)
+    for j, c in green:
+        match = match[CANDIDATES[match, j] == c]
+    for j, c in yellow:
+        match = match[CANDIDATES[match, j] != c]
+    for c, n in exact_counts:
+        match = match[(CANDIDATES[match] == c).sum(axis=1) == n]
+    for c, n in min_counts:
+        match = match[(CANDIDATES[match] == c).sum(axis=1) >= n]
+    for j, c in grey:
+        match = match[np.all(CANDIDATES[match] != c, axis=1)]
+
+    return match.size
+
 
 def main():
-    if os.path.exists('first_move.pkl'):
-        with open('first_move.pkl', 'rb') as f:
-            guess_stats = pkl.load(f)['guess_stats']
+    if os.path.exists('first_move_12k.pkl'):
+        with open('first_move_12k.pkl', 'rb') as f:
+            guess_stats = pkl.load(f)
     else:
-        guess_stats = {decode(w): {'total': 0, 'min': float('inf'), 'max': -float('inf'), 'num': 0} for w in DICTIONARY}
-        word_stats = dict()
-        for i, word in tqdm(enumerate(CANDIDATES), total=len(CANDIDATES)):
-            s = State(word)
-            tot = 0
-            mn = float('inf')
-            mx = -float('inf')
-            for guess in DICTIONARY:
-                remaining = s.guess(guess).size
-                tot += remaining
-                mn = min(mn, remaining)
-                mx = max(mx, remaining)
-
-                dw = decode(guess)
-                guess_stats[dw]['total'] += remaining
-                guess_stats[dw]['min'] = min(guess_stats[dw]['min'], remaining)
-                guess_stats[dw]['max'] = max(guess_stats[dw]['max'], remaining)
-                guess_stats[dw]['num'] = i + 1
-
-            word_stats[decode(word)] = {'total': tot, 'min': mn, 'max': mx}
-        print('saving results to first_move.pkl')
-        with open('first_move.pkl', 'wb') as f:
-            pkl.dump({'word_stats': word_stats, 'guess_stats': guess_stats}, f)
+        from multiprocessing import Pool
+        guess_stats = dict()
+        for guess in tqdm(DICTIONARY):
+            stats = {'total': 0, 'min': float('inf'), 'max': -float('inf'), 'num': 0}
+            for hints, num_repeats in zip(*np.unique(generate_all_hints(guess, CANDIDATES), return_counts=True, axis=0)):
+                num_remaining = count_remaining_candidates(guess, hints)
+                stats['min'] = min(stats['min'], num_remaining)
+                stats['max'] = max(stats['max'], num_remaining)
+                stats['total'] += num_remaining * num_repeats
+                stats['num'] += num_repeats
+            guess_stats[decode(guess)] = stats
+        print('saving results to first_move_12k.pkl')
+        with open('first_move_12k.pkl', 'wb') as f:
+            pkl.dump(guess_stats, f)
 
     # best word is one that gives lowest number of candidates, tie broken by lowest average number of candidates
     best_starting = min(guess_stats, key=lambda k: (guess_stats[k]['max'], guess_stats[k]['total']))

@@ -2,6 +2,7 @@ import numpy as np
 from tqdm import tqdm
 import pickle as pkl
 import sys
+from collections import Counter
 
 
 def _generate_hints(word, guess):
@@ -13,6 +14,29 @@ def _generate_hints(word, guess):
         if gc in rem:
             rem.remove(gc)
             hints[i] = 0
+    return hints
+
+
+def _generate_all_hints(guess, candidates):
+    green = (guess[None, :] == candidates).astype(int)
+    not_grey = np.zeros(green.shape, dtype=int)
+
+    num_rem = dict()
+    for c,n in Counter(guess).items():
+        if n > 1:
+            matches = (candidates == c)
+            num_correct = np.logical_and(matches, green).sum(axis=1)
+            num_in = matches.sum(axis=1)
+            num_rem[c] = num_in - num_correct
+
+    for i,c in enumerate(guess):
+        if c in num_rem:
+            not_grey[:, i] = np.logical_or(num_rem[c] > 0, green[:,i])
+            num_rem[c] -= (1 - green[:, i])
+        else:
+            not_grey[:, i] = np.any(candidates == c, axis=1)
+
+    hints = not_grey + green - 1
     return hints
 
 
@@ -34,14 +58,14 @@ def hints_to_str(hints):
 
 class Engine:
     def __init__(self):
-        self.candidates = np.load('bitword_candidates.npy')
+        self.candidates = np.load('bitword_dictionary.npy')
         self.dictionary = np.load('bitword_dictionary.npy')
         self.guesses = 0
         self.guess_list = []
         self.hint_list = []
-        with open('lookup_table_raise.pkl', 'rb') as f:
-            self.lookup_table = pkl.load(f)
-
+        self.lookup_table = dict()
+        # with open('lookup_table_12k_serai.pkl', 'rb') as f:
+        #     self.lookup_table = pkl.load(f)
 
     def apply_guess(self, guess, hints):
         keep_idx = self._get_match_indices(_encode(guess), hints)
@@ -50,7 +74,7 @@ class Engine:
         self.guess_list.append(guess)
         self.hint_list.append(tuple(hints.tolist()))
 
-    def get_best_guess(self):
+    def get_best_guess(self, pbar_loc=0):
         d = self.lookup_table
         found = True
         for guess, hint in zip(self.guess_list, self.hint_list):
@@ -69,13 +93,12 @@ class Engine:
         min_max_match = float('inf')
         min_tot_match = float('inf')
         min_max_guess = []
-        for guess in tqdm(self.dictionary):
+        for guess in tqdm(self.dictionary, ncols=0, lock_args=False, leave=False, position=pbar_loc):
             tot_match = 0
             max_match = -float('inf')
-            for word in self.candidates:
-                hints = _generate_hints(word, guess)
+            for hints, repeats in zip(*np.unique(_generate_all_hints(guess, self.candidates), return_counts=True, axis=0)):
                 num_match = self._get_match_indices(guess, hints).size
-                tot_match += num_match
+                tot_match += num_match * repeats
                 max_match = max(max_match, num_match)
 
             if max_match < min_max_match:
@@ -157,37 +180,80 @@ def count_guesses(word):
     return guesses
 
 
-def build_lookup_table():
-    word_map = {'raise': {}}
-    TOTAL_HINTS = len({tuple(_generate_hints(w, 'raise').tolist()) for w in map(_decode,Engine().candidates) if w!='raise'})
+def process(progress_queue, initial_guess, initial_hints):
+    pbar_loc = progress_queue.get() if progress_queue is not None else 1
+    try:
+        def recursive(args, d, level=0):
+            temp_eng = Engine()
+            for g,h in args:
+                temp_eng.apply_guess(g,h)
 
-    def recursive(args, d, level=0):
-        temp_eng = Engine()
-        for g,h in args:
-            temp_eng.apply_guess(g,h)
-        candidates = list(map(_decode,temp_eng.candidates))
-
-        for guess in d:
-            for word in candidates:
-                if word == guess:
-                    continue
-                hints = _generate_hints(word, guess)
-                k = tuple(hints.tolist())
-                if k not in d[guess]:
+            for guess in d:
+                for hints in np.unique(_generate_all_hints(_encode(guess), temp_eng.candidates), axis=0):
+                    if (hints==1).all():
+                        continue
                     eng = Engine()
                     for g,h in args:
                         eng.apply_guess(g,h)
                     eng.apply_guess(guess, hints)
-                    if level == 0:
-                        print(f'Processing hint {(len(d[guess])+1)}/{TOTAL_HINTS}', file=sys.stderr)
-                    best = eng.get_best_guess()
+                    best = eng.get_best_guess(pbar_loc=pbar_loc)
+
+                    k = tuple(hints.tolist())
                     d[guess][k] = {best: {}}
                     recursive(args + [(guess, hints)], d[guess][k], level+1)
+            return d
 
-    recursive([], word_map)
+        def init_decision_tree():
+            initial_args = [(initial_guess, initial_hints)]
 
-    with open('lookup_table_raise.pkl', 'wb') as f:
-        pkl.dump(word_map, f)
+            eng = Engine()
+            eng.apply_guess(*initial_args[0])
+            best = eng.get_best_guess(pbar_loc=pbar_loc)
+
+            initial_k = tuple(initial_hints.tolist())
+            decision_tree = {initial_guess: {initial_k: {best: {}}}}
+            return initial_args, decision_tree
+
+        hint_key = tuple(initial_hints.tolist())
+        return hint_key, recursive(*init_decision_tree())[initial_guess][hint_key]
+    finally:
+        if progress_queue is not None:
+            progress_queue.put(pbar_loc)
+
+
+def build_lookup_table():
+    from multiprocessing import Pool, Manager
+    from functools import partial
+
+    NUM_WORKERS = 1
+    STARTING_WORD = 'serai'
+
+    hints = np.unique(_generate_all_hints(_encode(STARTING_WORD), Engine().candidates), axis=0)
+    hints = hints[np.any(hints!=1,axis=1)]
+
+    lookup_table = {STARTING_WORD: {}}
+
+    with tqdm(total=len(hints), desc=f'Processing {STARTING_WORD} hints', ncols=0, position=0) as pbar:
+        if NUM_WORKERS > 1:
+            with Manager() as manager:
+                progress_queue = manager.Queue()
+                for i in range(NUM_WORKERS):
+                    progress_queue.put(i+1)
+
+                proc_fun = partial(process, progress_queue, STARTING_WORD)
+
+                with Pool(initializer=tqdm.set_lock, initargs=(tqdm.get_lock(),), processes=NUM_WORKERS) as pool:
+                    for k, branch in tqdm(pool.imap_unordered(proc_fun, hints), desc=f'Processing {STARTING_WORD} hints'):
+                        lookup_table[STARTING_WORD][k] = branch
+                        pbar.update()
+        else:
+            for h in hints:
+                k, branch = process(None, STARTING_WORD, h)
+                lookup_table[STARTING_WORD][k] = branch
+                pbar.update()
+
+    with open('lookup_table_par.pkl', 'wb') as f:
+        pkl.dump(lookup_table, f)
 
 
 def interactive_helper():
@@ -215,6 +281,6 @@ if __name__ == "__main__":
     # print('max guesses =',max(count))
     # print('avg guesses =',sum(count)/len(count))
 
-    interactive_helper()
+    # interactive_helper()
 
-    # build_lookup_table()
+    build_lookup_table()
