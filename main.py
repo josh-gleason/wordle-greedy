@@ -183,7 +183,7 @@ def count_guesses(word):
 def process(progress_queue, initial_guess, initial_hints):
     pbar_loc = progress_queue.get() if progress_queue is not None else 1
     try:
-        def recursive(args, d, level=0):
+        def recursive(args, d, level=1):
             temp_eng = Engine()
             for g,h in args:
                 temp_eng.apply_guess(g,h)
@@ -203,7 +203,7 @@ def process(progress_queue, initial_guess, initial_hints):
                     recursive(args + [(guess, hints)], d[guess][k], level+1)
             return d
 
-        def init_decision_tree():
+        def build_decision_tree():
             initial_args = [(initial_guess, initial_hints)]
 
             eng = Engine()
@@ -211,11 +211,11 @@ def process(progress_queue, initial_guess, initial_hints):
             best = eng.get_best_guess(pbar_loc=pbar_loc)
 
             initial_k = tuple(initial_hints.tolist())
-            decision_tree = {initial_guess: {initial_k: {best: {}}}}
-            return initial_args, decision_tree
+            decision_tree = {best: {}}
+            recursive(initial_args, decision_tree)
+            return initial_k, decision_tree
 
-        hint_key = tuple(initial_hints.tolist())
-        return hint_key, recursive(*init_decision_tree())[initial_guess][hint_key]
+        return build_decision_tree()
     finally:
         if progress_queue is not None:
             progress_queue.put(pbar_loc)
@@ -277,22 +277,22 @@ def interactive_helper():
 
 
 if __name__ == "__main__":
-    from collections import defaultdict
-
-    counts = defaultdict(list)
-    for word in tqdm(map(_decode,Engine().candidates), ncols=0, total=len(Engine().candidates)):
-        counts[count_guesses(word)].append(word)
-    max_guesses = max(counts)
-    total = 0
-    s = 0
-    for k in sorted(counts.keys()):
-        if k > 6:
-            print(f'{k}: ({len(counts[k])}) {counts[k]}')
-        s += k * len(counts[k])
-        total += len(counts[k])
-    print('max guesses =',max(counts))
-    print('avg guesses =',s / total)
-
+    # from collections import defaultdict
+    # 
+    # counts = defaultdict(list)
+    # for word in tqdm(map(_decode,Engine().candidates), ncols=0, total=len(Engine().candidates)):
+    #     counts[count_guesses(word)].append(word)
+    # max_guesses = max(counts)
+    # total = 0
+    # s = 0
+    # for k in sorted(counts.keys()):
+    #     if k > 6:
+    #         print(f'{k}: ({len(counts[k])}) {counts[k]}')
+    #     s += k * len(counts[k])
+    #     total += len(counts[k])
+    # print('max guesses =',max(counts))
+    # print('avg guesses =',s / total)
+    # 
     # interactive_helper()
 
-    # build_lookup_table()
+    build_lookup_table()
