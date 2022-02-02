@@ -64,8 +64,8 @@ class Engine:
         self.guess_list = []
         self.hint_list = []
         self.lookup_table = dict()
-        # with open('lookup_table_12k_serai.pkl', 'rb') as f:
-        #     self.lookup_table = pkl.load(f)
+        with open('lookup_table_par.pkl', 'rb') as f:
+            self.lookup_table = pkl.load(f)
 
     def apply_guess(self, guess, hints):
         keep_idx = self._get_match_indices(_encode(guess), hints)
@@ -93,7 +93,7 @@ class Engine:
         min_max_match = float('inf')
         min_tot_match = float('inf')
         min_max_guess = []
-        for guess in tqdm(self.dictionary, ncols=0, lock_args=False, leave=False, position=pbar_loc):
+        for guess in tqdm(self.dictionary, bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}', lock_args=False, leave=False, position=pbar_loc):
             tot_match = 0
             max_match = -float('inf')
             for hints, repeats in zip(*np.unique(_generate_all_hints(guess, self.candidates), return_counts=True, axis=0)):
@@ -225,7 +225,7 @@ def build_lookup_table():
     from multiprocessing import Pool, Manager
     from functools import partial
 
-    NUM_WORKERS = 1
+    NUM_WORKERS = 64
     STARTING_WORD = 'serai'
 
     hints = np.unique(_generate_all_hints(_encode(STARTING_WORD), Engine().candidates), axis=0)
@@ -233,7 +233,7 @@ def build_lookup_table():
 
     lookup_table = {STARTING_WORD: {}}
 
-    with tqdm(total=len(hints), desc=f'Processing {STARTING_WORD} hints', ncols=0, position=0) as pbar:
+    with tqdm(total=len(hints), desc=f'Processing {STARTING_WORD} hints', ncols=90, position=0) as pbar:
         if NUM_WORKERS > 1:
             with Manager() as manager:
                 progress_queue = manager.Queue()
@@ -277,10 +277,22 @@ def interactive_helper():
 
 
 if __name__ == "__main__":
-    # count = [count_guesses(word) for word in map(_decode,Engine().candidates)]
-    # print('max guesses =',max(count))
-    # print('avg guesses =',sum(count)/len(count))
+    from collections import defaultdict
+
+    counts = defaultdict(list)
+    for word in tqdm(map(_decode,Engine().candidates), ncols=0, total=len(Engine().candidates)):
+        counts[count_guesses(word)].append(word)
+    max_guesses = max(counts)
+    total = 0
+    s = 0
+    for k in sorted(counts.keys()):
+        if k > 6:
+            print(f'{k}: ({len(counts[k])}) {counts[k]}')
+        s += k * len(counts[k])
+        total += len(counts[k])
+    print('max guesses =',max(counts))
+    print('avg guesses =',s / total)
 
     # interactive_helper()
 
-    build_lookup_table()
+    # build_lookup_table()
